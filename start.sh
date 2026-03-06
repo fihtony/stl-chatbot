@@ -1,38 +1,38 @@
 #!/bin/bash
 
-# Collège Saint-Louis Chatbot - 启动脚本
-# 同时启动前端和后端服务
+# Collège Saint-Louis Chatbot - Start script
+# Starts both frontend and backend services
 
 set -e
 
-echo "🚀 启动 Collège Saint-Louis Chatbot..."
+echo "🚀 Starting Collège Saint-Louis Chatbot..."
 echo ""
 
-# 颜色定义
+# Colors
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# 检查 Python 环境
-echo -e "${BLUE}📦 检查 Python 环境...${NC}"
+# Check Python
+echo -e "${BLUE}📦 Checking Python...${NC}"
 if ! command -v python3 &> /dev/null; then
-    echo -e "${YELLOW}⚠️  Python 3 未安装${NC}"
+    echo -e "${YELLOW}⚠️  Python 3 is not installed${NC}"
     exit 1
 fi
 
-# 检查 Node.js 环境
-echo -e "${BLUE}📦 检查 Node.js 环境...${NC}"
+# Check Node.js
+echo -e "${BLUE}📦 Checking Node.js...${NC}"
 if ! command -v node &> /dev/null; then
-    echo -e "${YELLOW}⚠️  Node.js 未安装${NC}"
+    echo -e "${YELLOW}⚠️  Node.js is not installed${NC}"
     exit 1
 fi
 
-# 检查后端依赖
-echo -e "${BLUE}📦 检查后端依赖...${NC}"
+# Check backend dependencies
+echo -e "${BLUE}📦 Checking backend dependencies...${NC}"
 cd backend
 if [ ! -d "venv" ]; then
-    echo -e "${YELLOW}⚠️  虚拟环境不存在,正在创建...${NC}"
+    echo -e "${YELLOW}⚠️  Virtual env not found, creating...${NC}"
     python3 -m venv venv
 fi
 
@@ -40,70 +40,85 @@ source venv/bin/activate
 pip install -q -r requirements.txt
 cd ..
 
-# 检查前端依赖
-echo -e "${BLUE}📦 检查前端依赖...${NC}"
+# Check frontend dependencies
+echo -e "${BLUE}📦 Checking frontend dependencies...${NC}"
 cd frontend
 if [ ! -d "node_modules" ]; then
-    echo -e "${YELLOW}⚠️  Node 模块不存在,正在安装...${NC}"
+    echo -e "${YELLOW}⚠️  Node modules not found, installing...${NC}"
     npm install
 fi
 cd ..
 
-# 创建日志目录
-mkdir -p logs
+# Log directory (absolute path from project root)
+LOG_DIR="$(cd "$(dirname "$0")" && pwd)/logs"
+mkdir -p "$LOG_DIR"
+BACKEND_LOG="$LOG_DIR/backend.log"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
 
 echo ""
-echo -e "${GREEN}✅ 环境检查完成${NC}"
+echo -e "${GREEN}✅ Environment check complete${NC}"
 echo ""
 
-# 启动后端
-echo -e "${BLUE}🐍 启动 Python 后端 (端口 8086)...${NC}"
+# Start backend: PYTHONUNBUFFERED=1 and python -u disable buffering; tee writes to file and terminal
+echo -e "${BLUE}🐍 Starting Python backend (port 8086)...${NC}"
 cd backend
 source venv/bin/activate
-python api_server.py > ../logs/backend.log 2>&1 &
+: > "$BACKEND_LOG"
+PYTHONUNBUFFERED=1 python -u api_server.py 2>&1 | tee "$BACKEND_LOG" &
 BACKEND_PID=$!
 cd ..
 
-# 等待后端启动
-echo -e "${YELLOW}⏳ 等待后端启动...${NC}"
-sleep 3
+# Wait for backend: up to 60s, check /api/health every 2s
+echo -e "${YELLOW}⏳ Waiting for backend to start...${NC}"
+BACKEND_OK=0
+for i in $(seq 1 30); do
+    if curl -sf http://localhost:8086/api/health > /dev/null; then
+        BACKEND_OK=1
+        break
+    fi
+    sleep 2
+done
 
-# 检查后端是否启动成功
-if ! curl -s http://localhost:8086/api/health > /dev/null; then
-    echo -e "${YELLOW}⚠️  后端启动失败,请检查日志: logs/backend.log${NC}"
+if [ "$BACKEND_OK" -ne 1 ]; then
+    echo -e "${YELLOW}⚠️  Backend failed to start. Last 40 lines of log:${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    tail -40 "$BACKEND_LOG" 2>/dev/null || echo "(no output)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${YELLOW}Full log: $BACKEND_LOG${NC}"
     kill $BACKEND_PID 2>/dev/null || true
     exit 1
 fi
 
-echo -e "${GREEN}✅ 后端启动成功 (PID: $BACKEND_PID)${NC}"
+echo -e "${GREEN}✅ Backend started (PID: $BACKEND_PID)${NC}"
 
-# 启动前端
-echo -e "${BLUE}⚛️  启动 Next.js 前端 (端口 3086)...${NC}"
+# Start frontend (tee writes to log and terminal)
+echo -e "${BLUE}⚛️  Starting Next.js frontend (port 3086)...${NC}"
 cd frontend
-npm run dev > ../logs/frontend.log 2>&1 &
+: > "$FRONTEND_LOG"
+npm run dev 2>&1 | tee "$FRONTEND_LOG" &
 FRONTEND_PID=$!
 cd ..
 
 echo ""
-echo -e "${GREEN}✅ 所有服务已启动!${NC}"
+echo -e "${GREEN}✅ All services started!${NC}"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${BLUE}📱 前端:${NC} http://localhost:3086"
-echo -e "${BLUE}🔧 后端:${NC} http://localhost:8086"
-echo -e "${BLUE}📊 API 文档:${NC} http://localhost:8086/docs"
+echo -e "${BLUE}📱 Frontend:${NC} http://localhost:3086"
+echo -e "${BLUE}🔧 Backend:${NC} http://localhost:8086"
+echo -e "${BLUE}📊 API docs:${NC} http://localhost:8086/docs"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo -e "${YELLOW}💡 提示:${NC}"
-echo "  - 按 Ctrl+C 停止所有服务"
-echo "  - 查看日志: tail -f logs/backend.log 或 logs/frontend.log"
+echo -e "${YELLOW}💡 Tips:${NC}"
+echo "  - Press Ctrl+C to stop all services"
+echo "  - View logs: tail -f $BACKEND_LOG or $FRONTEND_LOG"
 echo ""
 
-# 保存 PID 到文件
-echo $BACKEND_PID > logs/backend.pid
-echo $FRONTEND_PID > logs/frontend.pid
+# Save PIDs
+echo $BACKEND_PID > "$LOG_DIR/backend.pid"
+echo $FRONTEND_PID > "$LOG_DIR/frontend.pid"
 
-# 等待用户中断
-trap "echo ''; echo '🛑 正在停止服务...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; rm -f logs/*.pid; echo '✅ 所有服务已停止'; exit 0" INT TERM
+# Wait for user interrupt
+trap "echo ''; echo '🛑 Stopping services...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; rm -f \"$LOG_DIR\"/*.pid; echo '✅ All services stopped'; exit 0" INT TERM
 
-# 保持脚本运行
+# Keep script running
 wait
