@@ -279,28 +279,39 @@ class MilvusIndexer:
         return self._embedding_model
 
     def _load_documents(self, input_dir: Path) -> Tuple[List[Path], List[Path]]:
-        """加载文档文件。
+        """Load document files from input directory.
+
+        Supports multiple layouts:
+        - Crawler output: input_dir/pages/*.txt, input_dir/documents/*.pdf
+        - Legacy: input_dir/scraped/pages/*.txt, input_dir/scraped/pdfs/*.pdf
+        - Flat: input_dir/*.pdf, input_dir/*.txt
 
         Args:
-            input_dir: 输入目录路径
+            input_dir: Root input directory path
 
         Returns:
-            元组 (PDF 文件列表, 文本文件列表)
+            Tuple of (list of PDF paths, list of text file paths)
         """
         pdf_files = []
         text_files = []
 
-        # 检查 scraped/pdfs 目录
+        # Crawler layout: pages/ (txt) and documents/ (pdf) under output_dir
+        crawler_pages = input_dir / "pages"
+        crawler_docs = input_dir / "documents"
+        if crawler_pages.exists():
+            text_files.extend(sorted(crawler_pages.glob("*.txt")))
+        if crawler_docs.exists():
+            pdf_files.extend(sorted(crawler_docs.glob("*.pdf")))
+
+        # Legacy: scraped/pdfs and scraped/pages
         pdfs_dir = input_dir / "scraped" / "pdfs"
         if pdfs_dir.exists():
             pdf_files.extend(sorted(pdfs_dir.glob("*.pdf")))
-
-        # 检查 scraped/pages 目录
         pages_dir = input_dir / "scraped" / "pages"
         if pages_dir.exists():
             text_files.extend(sorted(pages_dir.glob("*.txt")))
 
-        # 检查输入目录根目录
+        # Flat: root-level PDFs and txt
         if input_dir.exists():
             pdf_files.extend(sorted(input_dir.glob("*.pdf")))
             text_files.extend(sorted(input_dir.glob("*.txt")))

@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import List, Optional
 import numpy as np
 
+# Allow loading HuggingFace/sentence-transformers cached models that contain custom
+# classes (PyTorch 2.4+ enforces weights_only=True by default; cached models need False).
+# Only applied when weights_only is not explicitly passed at the call site.
+# See: https://pytorch.org/docs/stable/notes/serialization.html
+if "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD" not in os.environ:
+    os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+
 # Try to import sentence-transformers, fall back to TF-IDF if unavailable
 SENTENCE_TRANSFORMERS_AVAILABLE = False
 try:

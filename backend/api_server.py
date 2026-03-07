@@ -3,6 +3,12 @@
 
 import sys
 import os
+
+# Allow PyTorch/sentence-transformers to load cached model weights (trusted). Must be set
+# before any torch import. See: https://pytorch.org/docs/stable/notes/serialization.html
+if os.environ.get("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD") is None:
+    os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -312,16 +318,29 @@ def run_scrape_in_background(trigger_source: str = "unknown"):
         logger.info(f"Found {len(existing_pages)} existing pages, {len(existing_docs)} existing documents")
 
         visited = set()
+        # Seed queue: base URL + optional seed_urls (e.g. /category/actualites/ for info-parents PDFs)
+        seed_urls = getattr(scrape_config, "seed_urls", None) or []
         queue = [base_url]
+        base_stripped = base_url.rstrip("/")
+        for u in seed_urls:
+            if u and u not in queue:
+                queue.append(u if u.startswith("http") else f"{base_stripped}{u}" if u.startswith("/") else f"{base_stripped}/{u}")
+        # Default: ensure actualités is crawled early so info-parents PDFs are found
+        actualites_url = f"{base_stripped}/category/actualites/"
+        if actualites_url not in queue:
+            queue.append(actualites_url)
+
         pdf_urls = []
 
+        max_pages = getattr(scrape_config, "max_pages", 250)
+        max_pdfs = getattr(scrape_config, "max_pdfs", 25)
         page_count = 0
         consecutive_404_count = 0  # Track consecutive 404 errors
         MAX_CONSECUTIVE_404 = 3    # Stop after 3 consecutive 404s
 
-        logger.info("Starting page crawling...")
+        logger.info("Starting page crawling (max_pages=%s, max_pdfs=%s)...", max_pages, max_pdfs)
 
-        while queue and page_count < 100:
+        while queue and page_count < max_pages:
             # Check if stop was requested
             if not scrape_status.is_running:
                 logger.info("Scrape stop requested, exiting crawling loop")
@@ -333,6 +352,12 @@ def run_scrape_in_background(trigger_source: str = "unknown"):
             visited.add(url)
 
             if any(skip in url for skip in ['/wp-json/', '/xmlrpc.php', '/feed/']):
+                continue
+
+            # Do not fetch binary assets as "pages" (would hang or fail parsing)
+            _path_lower = urlparse(url).path.lower()
+            if any(_path_lower.endswith(ext) for ext in ('.pdf', '.jpg', '.jpeg', '.png', '.gif', '.zip', '.doc', '.docx', '.xls', '.xlsx', '.mp4', '.mp3', '.webp', '.ico')):
+                logger.debug("Skipping binary URL (not a page): %s", url)
                 continue
 
             scrape_status.current_page = url
@@ -438,9 +463,15 @@ def run_scrape_in_background(trigger_source: str = "unknown"):
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 absolute_url = urljoin(url, href)
-                if urlparse(absolute_url).netloc == urlparse(base_url).netloc:
-                    if absolute_url not in visited and absolute_url not in queue:
-                        queue.append(absolute_url)
+                if urlparse(absolute_url).netloc != urlparse(base_url).netloc:
+                    continue
+                if absolute_url in visited or absolute_url in queue:
+                    continue
+                # Do not add binary URLs to the page queue (we only collect PDFs for download later)
+                path_lower = urlparse(absolute_url).path.lower()
+                if any(path_lower.endswith(ext) for ext in ('.pdf', '.jpg', '.jpeg', '.png', '.gif', '.zip', '.doc', '.docx', '.xls', '.xlsx', '.mp4', '.mp3', '.webp', '.ico')):
+                    continue
+                queue.append(absolute_url)
             
             for a in soup.find_all('a', href=True):
                 href = a['href']
@@ -454,16 +485,16 @@ def run_scrape_in_background(trigger_source: str = "unknown"):
         scrape_status.total_pdfs = len(pdf_urls)
         downloaded = 0
 
-        logger.info(f"Found {len(pdf_urls)} PDF URLs, downloading up to 10...")
+        logger.info(f"Found {len(pdf_urls)} PDF URLs, downloading up to {max_pdfs}...")
 
-        for i, pdf_url in enumerate(pdf_urls[:10]):
+        for i, pdf_url in enumerate(pdf_urls[:max_pdfs]):
             # Check if stop was requested
             if not scrape_status.is_running:
                 logger.info("Scrape stop requested during PDF download, exiting")
                 break
 
             try:
-                logger.info(f"Downloading PDF {i+1}/{min(10, len(pdf_urls))}: {pdf_url}")
+                logger.info(f"Downloading PDF {i+1}/{min(max_pdfs, len(pdf_urls))}: {pdf_url}")
                 response = requests.get(pdf_url, headers=SCRAPER_HEADERS, timeout=scrape_config.timeout)
                 response.raise_for_status()
 
@@ -494,10 +525,10 @@ def run_scrape_in_background(trigger_source: str = "unknown"):
         # Log final summary
         logger.info(f"Scraping complete: {page_count} pages, {downloaded} PDFs downloaded")
 
-        # Auto-index new files after scraping completes
+        # Auto-index after scraping: first time (no collection/registry) or incremental (new docs only)
         try:
-            logger.info("Auto-indexing new files with Milvus...")
-            # Use Milvus indexer
+            scrape_output = Path(scrape_config.output_dir).resolve()
+            logger.info("Auto-indexing scraped files with Milvus (from %s)...", scrape_output)
             from src.milvus_store import MilvusStore
             from src.milvus_indexer import MilvusIndexer
 
@@ -507,8 +538,6 @@ def run_scrape_in_background(trigger_source: str = "unknown"):
                 collection_name=config.milvus_collection,
                 reset=False,
             )
-            from src.milvus_indexer import MilvusIndexer
-            # Use embedding model string (MilvusIndexer initializes EmbeddingClient internally)
             indexer = MilvusIndexer(
                 milvus_store,
                 embedding_model="BAAI/bge-m3",
@@ -516,7 +545,7 @@ def run_scrape_in_background(trigger_source: str = "unknown"):
                 chunk_overlap=config.chunk_overlap
             )
 
-            index_result = indexer.add_new_documents(input_dir=scrape_config.output_dir)
+            index_result = indexer.add_new_documents(input_dir=str(scrape_output))
 
             if index_result.get("chunks_added", 0) > 0:
                 logger.info(f"Auto-indexed {index_result.get('chunks_added', 0)} chunks from {index_result.get('added', 0)} files")

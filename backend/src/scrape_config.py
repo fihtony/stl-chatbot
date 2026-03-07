@@ -24,6 +24,9 @@ class ScrapeConfig:
         "output_dir": "./data/input/scraped",
         "timeout": 30,
         "respect_robots_txt": True,
+        "max_pages": 500,
+        "max_pdfs": 50,
+        "seed_urls": [],
     }
 
     # Type hints for class attributes
@@ -33,6 +36,9 @@ class ScrapeConfig:
     output_dir: str
     timeout: int
     respect_robots_txt: bool
+    max_pages: int
+    max_pdfs: int
+    seed_urls: list
 
     def __init__(self, **kwargs):
         for key, value in self.DEFAULTS.items():
@@ -71,6 +77,9 @@ class ScrapeConfig:
             "output_dir": self.output_dir,
             "timeout": self.timeout,
             "respect_robots_txt": self.respect_robots_txt,
+            "max_pages": getattr(self, "max_pages", 200),
+            "max_pdfs": getattr(self, "max_pdfs", 65),
+            "seed_urls": getattr(self, "seed_urls", []),
         }
 
     def to_cron_format(self) -> str:
