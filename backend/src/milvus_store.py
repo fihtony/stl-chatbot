@@ -8,6 +8,7 @@
 """
 
 import time
+import threading
 from typing import List, Dict, Any, Optional, Tuple
 from pymilvus import (
     connections,
@@ -90,31 +91,57 @@ class MilvusStore:
         Returns:
             连接成功返回 True，否则返回 False
         """
-        try:
-            # 使用 alias "default" 进行连接
-            if connections.has_connection("default"):
-                connections.disconnect("default")
+        result = {'success': False, 'done': False}
+        exception_holder = {'exception': None}
 
-            connections.connect(
-                alias="default",
-                host=self.host,
-                port=self.port,
-            )
+        def connect_with_timeout():
+            try:
+                # 使用 alias "default" 进行连接
+                if connections.has_connection("default"):
+                    connections.disconnect("default")
 
-            # 测试连接
-            connections.list_connections()
+                connections.connect(
+                    alias="default",
+                    host=self.host,
+                    port=self.port,
+                )
 
-            self._connected = True
-            self._healthy = True
-            self._last_error = None
-            return True
+                # 测试连接
+                connections.list_connections()
+                result['success'] = True
+            except Exception as e:
+                exception_holder['exception'] = e
+            finally:
+                result['done'] = True
 
-        except MilvusException as e:
+        # 使用线程实现超时机制
+        thread = threading.Thread(target=connect_with_timeout, daemon=True)
+        thread.start()
+        thread.join(timeout=3.0)  # 3秒超时
+
+        if not result['done']:
+            # 超时
+            self._connected = False
+            self._healthy = False
+            self._last_error = "Connection timeout after 3 seconds"
+            print(f"⚠️ Milvus 连接超时: 无法连接到 {self.host}:{self.port}")
+            return False
+
+        if exception_holder['exception']:
+            e = exception_holder['exception']
             self._connected = False
             self._healthy = False
             self._last_error = str(e)
             print(f"⚠️ Milvus 连接错误: {e}")
             return False
+
+        if result['success']:
+            self._connected = True
+            self._healthy = True
+            self._last_error = None
+            return True
+
+        return False
 
     def disconnect(self):
         """断开与 Milvus 的连接。"""

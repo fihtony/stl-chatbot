@@ -10,6 +10,16 @@ interface Message {
   timestamp: Date;
 }
 
+interface IndexingProgress {
+  is_indexing: boolean;
+  progress: number;
+  current_file: string;
+  total_files: number;
+  processed_files: number;
+  status: string;
+  error_message: string;
+}
+
 export default function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -22,6 +32,7 @@ export default function ChatInterface() {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isPreloading, setIsPreloading] = useState(true);
+  const [indexingProgress, setIndexingProgress] = useState<IndexingProgress | null>(null);
   const [aiProvider, setAiProvider] = useState<'zhipu'>('zhipu');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -34,20 +45,48 @@ export default function ChatInterface() {
     scrollToBottom();
   }, [messages]);
 
-  // Preload documents when component mounts
+  // Poll indexing progress
   useEffect(() => {
-    // Trigger document preload in background
-    const startTime = Date.now();
-    fetch('/api/chat', { method: 'GET' })
-      .then(() => {
-        const loadTime = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`✅ Documents preloaded successfully (${loadTime}s)`);
-        setIsPreloading(false);
-      })
-      .catch((error) => {
-        console.warn('⚠️ Document preload failed (non-critical):', error);
-        setIsPreloading(false);
-      });
+    let mounted = true;
+    let pollingInterval: NodeJS.Timeout | null = null;
+
+    const checkIndexingProgress = async () => {
+      try {
+        const response = await fetch('/api/admin/index-progress');
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success && data.data && mounted) {
+            setIndexingProgress(data.data);
+
+            // Stop polling if indexing is complete or not happening
+            if (!data.data.is_indexing && data.data.status !== 'initializing') {
+              if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+              }
+              // Hide preloading after indexing is done
+              setTimeout(() => setIsPreloading(false), 500);
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to check indexing progress:', error);
+        // Don't treat as critical - system can work without indexing
+      }
+    };
+
+    // Initial check
+    checkIndexingProgress();
+
+    // Poll every 2 seconds if indexing is in progress
+    pollingInterval = setInterval(checkIndexingProgress, 2000);
+
+    return () => {
+      mounted = false;
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+      }
+    };
   }, []);
 
   const handleSend = async () => {
@@ -155,14 +194,41 @@ export default function ChatInterface() {
         <div className="max-w-4xl mx-auto space-y-4">
           {isPreloading && (
             <div className="flex justify-center items-center py-8">
-              <div className="bg-white rounded-2xl px-6 py-4 shadow-sm">
-                <div className="flex items-center space-x-3">
+              <div className="bg-white rounded-2xl px-6 py-4 shadow-sm w-full max-w-md">
+                <div className="flex flex-col items-center space-y-3">
                   <div className="flex space-x-2">
                     <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
                     <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
                     <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
                   </div>
-                  <span className="text-sm text-gray-600">Chargement des documents...</span>
+                  {indexingProgress && indexingProgress.is_indexing ? (
+                    <>
+                      <span className="text-sm text-gray-600">
+                        Indexation des documents en cours...
+                      </span>
+                      {indexingProgress.total_files > 0 && (
+                        <div className="w-full">
+                          <div className="flex justify-between text-xs text-gray-500 mb-1">
+                            <span>{indexingProgress.processed_files} / {indexingProgress.total_files} fichiers</span>
+                            <span>{indexingProgress.progress}%</span>
+                          </div>
+                          <div className="w-full bg-gray-200 rounded-full h-2">
+                            <div
+                              className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                              style={{ width: `${indexingProgress.progress}%` }}
+                            ></div>
+                          </div>
+                          {indexingProgress.current_file && (
+                            <span className="text-xs text-gray-400 truncate w-full text-center">
+                              {indexingProgress.current_file}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-sm text-gray-600">Chargement des documents...</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -203,12 +269,12 @@ export default function ChatInterface() {
                   maxHeight: '120px',
                   color: '#111827', // Force black text color
                 }}
-                disabled={isLoading}
+                disabled={isLoading || isPreloading}
               />
             </div>
             <button
               onClick={handleSend}
-              disabled={!inputValue.trim() || isLoading}
+              disabled={!inputValue.trim() || isLoading || isPreloading}
               className="px-6 py-3 bg-blue-600 text-white rounded-2xl font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               Envoyer

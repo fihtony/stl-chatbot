@@ -24,8 +24,8 @@ class ScrapeConfig:
         "output_dir": "./data/input/scraped",
         "timeout": 30,
         "respect_robots_txt": True,
-        "max_pages": 500,
-        "max_pdfs": 50,
+        "max_pages": None,  # No limit - crawl all pages
+        "max_pdfs": None,   # No limit - download all PDFs
         "seed_urls": [],
     }
 
@@ -77,8 +77,8 @@ class ScrapeConfig:
             "output_dir": self.output_dir,
             "timeout": self.timeout,
             "respect_robots_txt": self.respect_robots_txt,
-            "max_pages": getattr(self, "max_pages", 200),
-            "max_pdfs": getattr(self, "max_pdfs", 65),
+            "max_pages": getattr(self, "max_pages", None),
+            "max_pdfs": getattr(self, "max_pdfs", None),
             "seed_urls": getattr(self, "seed_urls", []),
         }
 

@@ -16,12 +16,18 @@ async function proxyRequest(request: NextRequest, path: string) {
   }
 
   try {
+    // Create AbortController with timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
+
     const response = await fetch(url, {
       method: request.method,
       headers,
       body: request.method !== 'GET' && request.method !== 'HEAD' ? await request.text() : undefined,
+      signal: controller.signal,
     });
 
+    clearTimeout(timeoutId);
     const data = await response.json();
 
     return NextResponse.json(data, { status: response.status });
