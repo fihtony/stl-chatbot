@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "../styles/globals.css";
+import { LanguageProvider } from "@/components/LanguageContext";
 
 export const metadata: Metadata = {
-  title: "Collège Saint-Louis - Chatbot",
-  description: "Une fenêtre ouverte sur le monde",
+  title: "Saint-Louis Chatbot",
+  description: "Your guide to insurance, wealth, and health solutions",
 };
 
 export const viewport = {
@@ -17,8 +18,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }): React.JSX.Element {
   return (
-    <html lang="fr">
-      <body>{children}</body>
+    <html lang="en">
+      <body>
+        <LanguageProvider>{children}</LanguageProvider>
+      </body>
     </html>
   );
 }

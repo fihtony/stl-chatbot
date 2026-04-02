@@ -146,7 +146,7 @@ async def health_check():
             else NotebookLMStatus.CONNECTED
         ),
         notebook_name=(
-            "College Saint Louis (Mock)" if config.MOCK_NOTEBOOKLM else "College Saint Louis"
+            "Saint-Louis (Mock)" if config.MOCK_NOTEBOOKLM else "Saint-Louis"
         ),
         auth_status=auth_status,
     )
@@ -166,6 +166,8 @@ async def chat(request: ChatRequest):
             answer=result[ResponseKeys.ANSWER],
             language=result[ResponseKeys.LANGUAGE],
             sources=result[ResponseKeys.SOURCES],
+            citations=result.get("citations", []),
+            suggestions=result.get("suggestions", []),
         )
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)

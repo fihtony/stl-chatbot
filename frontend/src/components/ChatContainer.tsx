@@ -2,26 +2,58 @@
 
 import { useState, useRef, useEffect } from "react";
 import MessageBubble from "./MessageBubble";
+import SuggestedQuestions from "./SuggestedQuestions";
 import InputArea from "./InputArea";
 import LoadingIndicator from "./LoadingIndicator";
+import { useLanguage } from "./LanguageContext";
+
+interface Citation {
+  id: number;
+  source: string;
+  original_ids: number[];
+  excerpt?: string;
+  content?: string;
+}
 
 interface Message {
   role: "user" | "assistant";
   content: string;
   timestamp?: string;
+  citations?: Citation[];
+  suggestions?: string[];
 }
 
 export default function ChatContainer() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "assistant",
-      content:
-        "Bonjour! Je suis l'assistant du Collège Saint-Louis. Comment puis-je vous aider?",
-      timestamp: new Date().toISOString(),
-    },
-  ]);
+  const { language, t } = useLanguage();
+  const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Reset welcome message when language changes
+  useEffect(() => {
+    if (messages.length === 0) {
+      setMessages([
+        {
+          role: "assistant",
+          content: t.welcomeMessage,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+    }
+  }, [language]);
+
+  // Initialize with welcome message
+  useEffect(() => {
+    if (messages.length === 0) {
+      setMessages([
+        {
+          role: "assistant",
+          content: t.welcomeMessage,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+    }
+  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -47,12 +79,19 @@ export default function ChatContainer() {
 
       const data = await response.json();
 
-      // Support both 'answer' and 'response' fields from API
-      const responseText = data.answer || data.response || "Pas de réponse reçue";
+      const responseText = data.answer || data.response || t.errorMessage;
+      const citations = data.citations || [];
+      const suggestions = data.suggestions || [];
 
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: responseText, timestamp: new Date().toISOString() },
+        {
+          role: "assistant",
+          content: responseText,
+          timestamp: new Date().toISOString(),
+          citations,
+          suggestions,
+        },
       ]);
     } catch (error) {
       console.error("Chat API error:", error);
@@ -60,8 +99,7 @@ export default function ChatContainer() {
         ...prev,
         {
           role: "assistant",
-          content:
-            "⚠️ Désolé, une erreur s'est produite. Veuillez réessayer.",
+          content: t.errorMessage,
           timestamp: new Date().toISOString(),
         },
       ]);
@@ -71,13 +109,29 @@ export default function ChatContainer() {
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-gradient-to-br from-blue-50 to-indigo-100 overflow-hidden">
+    <div className="flex-1 flex flex-col bg-gradient-to-br from-yellow-50 to-orange-50 overflow-hidden">
       {/* Messages Container - scrollable area */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
         <div className="max-w-6xl mx-auto space-y-4">
           {messages.map((msg, index) => (
-            <MessageBubble key={index} role={msg.role} content={msg.content} />
+            <MessageBubble
+              key={index}
+              role={msg.role}
+              content={msg.content}
+              citations={msg.citations}
+            />
           ))}
+          {/* Show suggestions from the last assistant message */}
+          {messages.length > 0 &&
+            messages[messages.length - 1].role === "assistant" &&
+            messages[messages.length - 1].suggestions &&
+            messages[messages.length - 1].suggestions!.length > 0 &&
+            !isLoading && (
+              <SuggestedQuestions
+                questions={messages[messages.length - 1].suggestions!}
+                onSelect={handleSend}
+              />
+            )}
           {isLoading && <LoadingIndicator />}
           <div ref={messagesEndRef} />
         </div>

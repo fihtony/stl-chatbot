@@ -9,10 +9,11 @@ The original skill code is in:
 """
 
 import re
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import sys
+import json
 from pathlib import Path
 
 # Add the skill module to path
@@ -21,13 +22,15 @@ if str(_skill_path) not in sys.path:
     sys.path.insert(0, str(_skill_path))
 
 from utils.logger import logger, QueryLogger
-from utils.text_formatter import TextFormatter
 from utils.notebooklm_formatter import format_notebooklm_response
 from utils.config import config
 from utils.constants import ResponseKeys, SourceLabels
 
 # Import the EXACT original function from the skill
 from services.notebooklm_skill import ask_notebooklm
+
+# Directory for per-question response files
+_RESPONSE_LOG_DIR = Path(__file__).parent.parent.parent / "logs" / "responses"
 
 
 # Security: Maximum question length to prevent DoS
@@ -82,7 +85,7 @@ class NotebookLMOriginalSkillService:
 
         return sanitized
 
-    def _run_query_in_thread(self, question: str, notebook_url: str) -> str:
+    def _run_query_in_thread(self, question: str, notebook_url: str) -> Dict[str, Any]:
         """
         Run the NotebookLM query in a separate thread to avoid asyncio conflicts
 
@@ -93,7 +96,7 @@ class NotebookLMOriginalSkillService:
             notebook_url: NotebookLM notebook URL
 
         Returns:
-            Answer text from NotebookLM
+            Dict with text, citations, suggestions from NotebookLM
         """
         # Call the original skill function directly
         # Using headless=True for production
@@ -107,7 +110,7 @@ class NotebookLMOriginalSkillService:
             question: The question to ask
 
         Returns:
-            Dict containing answer, sources, and language
+            Dict containing answer, sources, language, citations, suggestions
 
         Raises:
             ValueError: If question is empty, whitespace, or contains invalid characters
@@ -132,22 +135,64 @@ Question:
 
         try:
             # Use the ORIGINAL skill code via thread pool to avoid asyncio conflicts
-            answer_text = _thread_pool.submit(
+            result = _thread_pool.submit(
                 self._run_query_in_thread,
                 question,
                 self.notebook_url
             ).result(timeout=180)
 
-            if answer_text is None:
+            if result is None:
                 logger.error("Query returned no answer")
                 QueryLogger.log_response(query_num, "Error: No answer returned from NotebookLM")
                 raise Exception("NotebookLM query failed: No answer returned")
 
-            # Log the successful response
-            QueryLogger.log_response(query_num, answer_text)
+            # Handle both old (str) and new (dict) return types
+            if isinstance(result, str):
+                raw_text = result
+                dom_markdown = None
+                citations = []
+                suggestions = []
+            else:
+                raw_text = result.get("text", "")
+                dom_markdown = result.get("dom_markdown")
+                citations = result.get("citations", [])
+                suggestions = result.get("suggestions", [])
 
-            # Parse and format response
-            return self._parse_response(answer_text)
+            # Log the successful response
+            QueryLogger.log_response(query_num, raw_text)
+
+            # Use DOM-built markdown with inline citations when available,
+            # otherwise fall back to clipboard text
+            if dom_markdown and citations:
+                # If DOM markdown is much shorter than clipboard, merge citations into clipboard
+                dom_len = len(dom_markdown)
+                clip_len = len(raw_text)
+                if dom_len < clip_len * 0.5 and clip_len > 200:
+                    logger.info(f"  ⚠ DOM markdown ({dom_len} chars) much shorter than clipboard ({clip_len} chars)")
+                    logger.info(f"  ✓ Merging citations from DOM into clipboard text")
+                    merged = self._merge_citations_into_text(raw_text, dom_markdown, citations)
+                    parsed = {
+                        ResponseKeys.ANSWER: merged,
+                        ResponseKeys.SOURCES: [SourceLabels.NOTEBOOKLM],
+                        ResponseKeys.LANGUAGE: self._detect_language(merged),
+                    }
+                else:
+                    logger.info(f"  ✓ Using DOM markdown with {len(citations)} inline citations ({dom_len} chars)")
+                    parsed = {
+                        ResponseKeys.ANSWER: dom_markdown,
+                        ResponseKeys.SOURCES: [SourceLabels.NOTEBOOKLM],
+                        ResponseKeys.LANGUAGE: self._detect_language(dom_markdown),
+                    }
+            else:
+                parsed = self._parse_response(raw_text)
+
+            parsed["citations"] = citations
+            parsed["suggestions"] = suggestions
+
+            # Save per-question file with raw response, formatted response, and metadata
+            self._save_question_file(question, raw_text, parsed)
+
+            return parsed
 
         except Exception as e:
             logger.error(f"Query error: {e}")
@@ -155,9 +200,51 @@ Question:
             QueryLogger.log_response(query_num, f"Error: {str(e)}")
             raise
 
+    def _save_question_file(self, question: str, raw_response: str, formatted_result: Dict[str, Any]) -> None:
+        """
+        Save complete question + response data to a per-question file.
+        This makes it easy to find and debug incorrect responses.
+
+        Args:
+            question: The original user question
+            raw_response: The raw response from NotebookLM (before formatting)
+            formatted_result: The parsed/formatted result dict
+        """
+        try:
+            _RESPONSE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"q{QueryLogger._query_counter}_{timestamp}.json"
+            filepath = _RESPONSE_LOG_DIR / filename
+
+            file_data = {
+                "query_number": QueryLogger._query_counter,
+                "timestamp": datetime.now().isoformat(),
+                "question": question,
+                "raw_response": raw_response,
+                "formatted_answer": formatted_result.get(ResponseKeys.ANSWER, ""),
+                "language": formatted_result.get(ResponseKeys.LANGUAGE, ""),
+                "sources": formatted_result.get(ResponseKeys.SOURCES, []),
+                "citations": formatted_result.get("citations", []),
+                "suggestions": formatted_result.get("suggestions", []),
+            }
+
+            filepath.write_text(
+                json.dumps(file_data, indent=2, ensure_ascii=False),
+                encoding='utf-8'
+            )
+            logger.info(f"  💾 Saved question file to: {filepath}")
+
+        except Exception as e:
+            logger.warning(f"  ! Failed to save question file: {e}")
+
     def _parse_response(self, output: str) -> Dict[str, Any]:
         """
-        Parse the response from NotebookLM
+        Parse the response from NotebookLM.
+
+        When the response comes from clipboard (clean markdown), we use it
+        directly with only light cleanup. When it comes from inner_text
+        (short responses), we apply the formatters.
 
         Args:
             output: Raw output from NotebookLM
@@ -165,23 +252,45 @@ Question:
         Returns:
             Dict with answer, sources, and language
         """
-        # The original skill returns the answer directly
-        # Remove the follow-up reminder if present
         answer = output.strip()
+
+        # Log raw answer BEFORE any formatting
+        logger.info(f"\n--- RAW RESPONSE (before formatting) ---")
+        logger.info(f"Length: {len(answer)} chars")
+        for line in answer[:2000].split('\n'):
+            logger.info(f"  RAW: {repr(line)}")
+        if len(answer) > 2000:
+            logger.info(f"  ... (truncated, {len(answer) - 2000} more chars)")
+        logger.info(f"--- END RAW RESPONSE ---\n")
 
         # Remove the FOLLOW_UP_REMINDER text that the skill adds
         follow_up_marker = "\n\nEXTREMELY IMPORTANT: Is that ALL you need to know?"
         if follow_up_marker in answer:
             answer = answer.split(follow_up_marker)[0].strip()
 
-        # Use the new NotebookLM formatter to clean up:
-        # 1. Remove citation number lines (lines with only numbers)
-        # 2. Merge punctuation-only lines with previous line
-        # 3. Ensure proper line breaks
-        answer = format_notebooklm_response(answer)
+        # Detect if this is already clean markdown from clipboard
+        # Clipboard markdown has proper formatting (headings, bold, lists with indentation)
+        is_clean_markdown = bool(
+            re.search(r'(\*\*.*?\*\*|^#{1,6}\s)', answer, re.MULTILINE)
+            or (len(answer) > 200 and '\n\n' in answer)
+        )
 
-        # Additional cleanup using TextFormatter for citation numbers in text
-        answer = TextFormatter.format_response(answer)
+        if is_clean_markdown:
+            # Clipboard markdown - use directly with only light cleanup
+            logger.info("  ✓ Using clipboard markdown directly (clean format)")
+        else:
+            # Inner text fallback - apply formatters for cleanup
+            logger.info("  ℹ Applying formatters (inner text fallback)")
+            answer = format_notebooklm_response(answer)
+
+        # Log formatted answer AFTER formatting
+        logger.info(f"\n--- FORMATTED RESPONSE (after formatting) ---")
+        logger.info(f"Length: {len(answer)} chars")
+        for line in answer[:2000].split('\n'):
+            logger.info(f"  FMT: {repr(line)}")
+        if len(answer) > 2000:
+            logger.info(f"  ... (truncated, {len(answer) - 2000} more chars)")
+        logger.info(f"--- END FORMATTED RESPONSE ---\n")
 
         language = self._detect_language(answer)
 
@@ -190,6 +299,64 @@ Question:
             ResponseKeys.SOURCES: [SourceLabels.NOTEBOOKLM],
             ResponseKeys.LANGUAGE: language,
         }
+
+    def _merge_citations_into_text(self, clipboard_text: str, dom_markdown: str, citations: list) -> str:
+        """
+        Merge citation markers from DOM markdown into clipboard text.
+
+        When the DOM extraction is incomplete, we use the full clipboard text
+        as the base and insert [^N] markers at positions that match the DOM
+        citation locations.
+
+        Args:
+            clipboard_text: Full clipboard text (complete but no citations)
+            dom_markdown: DOM-built markdown (may be incomplete but has citations)
+            citations: List of citation dicts with id, source, etc.
+
+        Returns:
+            Clipboard text with citation markers inserted
+        """
+        merged = clipboard_text
+
+        # Extract citation markers and their surrounding context from DOM markdown
+        # Pattern: find [^N] and capture ~50 chars of context before it
+        citation_contexts = []
+        for match in re.finditer(r'([^\n]{10,80}?)\[\^(\d+)\]', dom_markdown):
+            context_before = match.group(1).strip()
+            cit_id = int(match.group(2))
+            # Clean the context (remove markdown formatting for matching)
+            clean_context = re.sub(r'\*\*|[#*]', '', context_before).strip()
+            if clean_context:
+                citation_contexts.append((cit_id, clean_context))
+
+        # Insert citations into clipboard text, working backwards to preserve positions
+        insertions = []
+        for cit_id, context in citation_contexts:
+            # Find this context in the clipboard text
+            # Use the last ~30 chars of context for matching (more unique)
+            search_text = context[-60:] if len(context) > 60 else context
+            # Clean for regex safety
+            search_escaped = re.escape(search_text)
+            match = re.search(search_escaped, merged)
+            if match:
+                insert_pos = match.end()
+                insertions.append((insert_pos, cit_id, context))
+
+        # Sort by position descending so we insert from end to start
+        insertions.sort(key=lambda x: x[0], reverse=True)
+
+        inserted_ids = set()
+        for pos, cit_id, context in insertions:
+            # Avoid duplicate markers at same position
+            marker = f'[^{cit_id}]'
+            # Check if already inserted nearby (within 5 chars)
+            nearby = merged[max(0, pos-5):pos+10]
+            if marker not in nearby:
+                merged = merged[:pos] + marker + merged[pos:]
+                inserted_ids.add(cit_id)
+
+        logger.info(f"  ✓ Merged {len(inserted_ids)} citation markers into clipboard text")
+        return merged
 
     def _detect_language(self, text: str) -> str:
         """
@@ -220,4 +387,4 @@ Question:
         Returns:
             Notebook name from config or default
         """
-        return "College Saint Louis"
+        return "Saint-Louis"

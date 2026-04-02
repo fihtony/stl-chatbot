@@ -24,6 +24,7 @@ from auth_manager import AuthManager
 from notebook_manager import NotebookLibrary
 from config import QUERY_INPUT_SELECTORS, RESPONSE_SELECTORS
 from browser_utils import BrowserFactory, StealthUtils
+from markdown_builder import BUILD_MARKDOWN_JS
 
 
 def _try_copy_button(response_element, page) -> str:
@@ -297,58 +298,68 @@ def ask_notebooklm(question: str, notebook_url: str, headless: bool = True) -> s
 
         print("  ✅ Got answer!")
 
-        # DEBUG: Save HTML for copy button analysis (only in development mode)
-        # Enable by setting DEBUG=1 environment variable
-        import os
-        if os.environ.get('DEBUG', '0') == '1':
-            try:
-                from pathlib import Path
-                from config import DATA_DIR
-                html_debug_dir = DATA_DIR / "html_debug"
-                html_debug_dir.mkdir(parents=True, exist_ok=True)
+        # Expand collapsed citation indicators (⋯ buttons) before extraction
+        # Quick JS click - no timeouts, keeps response fast
+        try:
+            page.evaluate(r"""() => {
+                const container = document.querySelectorAll('.to-user-container');
+                if (container.length === 0) return 0;
+                const last = container[container.length - 1];
+                const btns = last.querySelectorAll('.mat-icon');
+                let count = 0;
+                for (const btn of btns) {
+                    try {
+                        const parent = btn.closest('button');
+                        if (parent) { parent.click(); count++; }
+                    } catch(e) {}
+                }
+                return count;
+            }""")
+        except Exception as e:
+            print(f"  ! Citation expansion: {e}")
 
-                # Save full page HTML
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                html_file = html_debug_dir / f"response_{timestamp}.html"
-                html_file.write_text(page.content(), encoding='utf-8')
-                print(f"  💾 Saved HTML to: {html_file}")
+        # Build markdown with inline citations from DOM
+        citations = []
+        suggestions = []
+        dom_markdown = None
 
-                # Try to get copy button HTML specifically
-                try:
-                    copy_btn_html = page.evaluate("""() => {
-                        const btn = document.querySelector('button[class*="copy"]');
-                        return btn ? btn.outerHTML : null;
-                    }""")
-                    if copy_btn_html:
-                        copy_btn_file = html_debug_dir / f"copy_button_{timestamp}.html"
-                        copy_btn_file.write_text(copy_btn_html, encoding='utf-8')
-                        print(f"  💾 Saved copy button HTML to: {copy_btn_file}")
-                except Exception as e:
-                    print(f"  ! Could not save copy button HTML: {e}")
+        try:
+            from markdown_builder import BUILD_MARKDOWN_JS
+            extracted = page.evaluate(BUILD_MARKDOWN_JS)
 
-                    # Get all buttons with aria-label containing "copy"
-                    try:
-                        all_copy_buttons = page.evaluate("""() => {
-                            const buttons = document.querySelectorAll('button[aria-label*="copy" i], button[class*="copy" i]');
-                        return Array.from(buttons).map(b => ({
-                            outerHTML: b.outerHTML,
-                            ariaLabel: b.getAttribute('aria-label'),
-                            className: b.className,
-                            textContent: b.textContent?.trim()
-                        }));
-                    }""")
-                        if all_copy_buttons:
-                            import json
-                            buttons_file = html_debug_dir / f"copy_buttons_{timestamp}.json"
-                            buttons_file.write_text(json.dumps(all_copy_buttons, indent=2), encoding='utf-8')
-                            print(f"  💾 Found {len(all_copy_buttons)} copy-related buttons, saved to: {buttons_file}")
-                    except Exception as e:
-                        print(f"  ! Could not enumerate copy buttons: {e}")
+            citations = extracted.get('citations', [])
+            suggestions = extracted.get('suggestions', [])
+            dom_markdown = extracted.get('markdown', '')
+            print(f"  📎 Citations: {len(citations)} unique sources")
+            print(f"  💡 Suggestions: {len(suggestions)} follow-up questions")
+            print(f"  📝 DOM markdown length: {len(dom_markdown)} chars")
 
-            except Exception as e:
-                print(f"  ! HTML debug save failed: {e}")
+        except Exception as e:
+            print(f"  ! DOM markdown extraction failed: {e}")
+            import traceback
+            traceback.print_exc()
 
-        return answer
+        # NOTE: Citation dialog clicking removed - it causes timeouts.
+        # Citation content is fetched on-demand when user hovers (lazy loading).
+
+        # Save HTML for debugging
+        try:
+            from config import DATA_DIR
+            html_debug_dir = DATA_DIR / "html_debug"
+            html_debug_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            html_file = html_debug_dir / f"response_{timestamp}.html"
+            html_file.write_text(page.content(), encoding='utf-8')
+            print(f"  💾 Saved HTML to: {html_file}")
+        except Exception as e:
+            print(f"  ! HTML save failed: {e}")
+
+        return {
+            "text": answer,  # clipboard text (fallback)
+            "dom_markdown": dom_markdown,  # DOM-built text with inline [^N] citations
+            "citations": citations,
+            "suggestions": suggestions,
+        }
 
     except Exception as e:
         print(f"  ❌ Error: {e}")
@@ -369,6 +380,8 @@ def ask_notebooklm(question: str, notebook_url: str, headless: bool = True) -> s
                 playwright.stop()
             except:
                 pass
+
+
 
 
 def main():
@@ -416,18 +429,29 @@ def main():
             return 1
 
     # Ask the question
-    answer = ask_notebooklm(
+    result = ask_notebooklm(
         question=args.question,
         notebook_url=notebook_url,
         headless=not args.show_browser
     )
 
-    if answer:
+    if result:
         print("\n" + "=" * 60)
         print(f"Question: {args.question}")
         print("=" * 60)
         print()
-        print(answer)
+        if isinstance(result, dict):
+            print(result.get("text", ""))
+            if result.get("citations"):
+                print("\n--- Citations ---")
+                for c in result["citations"]:
+                    print(f"  [{c['id']}] {c['source']}")
+            if result.get("suggestions"):
+                print("\n--- Suggestions ---")
+                for s in result["suggestions"]:
+                    print(f"  • {s}")
+        else:
+            print(result)
         print()
         print("=" * 60)
         return 0

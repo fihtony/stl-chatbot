@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, FormEvent, useRef, useEffect } from "react";
+import { useLanguage } from "./LanguageContext";
 
 interface InputAreaProps {
   onSend: (message: string) => void;
@@ -9,17 +10,16 @@ interface InputAreaProps {
 
 export default function InputArea({ onSend, disabled }: InputAreaProps) {
   const [message, setMessage] = useState("");
+  const { t } = useLanguage();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-resize textarea
   useEffect(() => {
     if (textareaRef.current) {
-      // Reset height to auto to get correct scrollHeight
       textareaRef.current.style.height = "48px";
       const scrollHeight = textareaRef.current.scrollHeight;
-      const newHeight = Math.min(scrollHeight, 120); // Max 5 lines (120px)
+      const newHeight = Math.min(scrollHeight, 120);
       textareaRef.current.style.height = `${newHeight}px`;
-      // Show scrollbar only when content exceeds max height
       textareaRef.current.style.overflowY = scrollHeight > 120 ? "auto" : "hidden";
     }
   }, [message]);
@@ -52,8 +52,8 @@ export default function InputArea({ onSend, disabled }: InputAreaProps) {
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Posez votre question..."
-              className="w-full px-4 py-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none overflow-y-auto text-gray-900 placeholder-gray-500 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent"
+              placeholder={t.inputPlaceholder}
+              className="w-full px-4 py-3 border border-gray-300 rounded-2xl focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent resize-none overflow-y-auto text-gray-900 placeholder-gray-500 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent"
               rows={1}
               style={{
                 minHeight: "48px",
@@ -62,17 +62,17 @@ export default function InputArea({ onSend, disabled }: InputAreaProps) {
                 overflowY: "hidden",
               }}
               disabled={disabled}
-              aria-label="Message input field"
+              aria-label={t.inputPlaceholder}
             />
           </div>
           <button
             type="submit"
             disabled={disabled || !message.trim()}
-            className="h-12 px-5 bg-blue-600 text-white rounded-2xl font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 shrink-0"
-            aria-label="Envoyer le message"
+            className="h-12 px-5 bg-yellow-500 text-white rounded-2xl font-medium hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 shrink-0"
+            aria-label={t.sendButtonAria}
           >
             <span>➤</span>
-            <span>Envoyer</span>
+            <span>{t.sendButton}</span>
           </button>
         </div>
       </form>
