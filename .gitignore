@@ -38,4 +38,5 @@ ui-test-screenshots/
 # NotebookLM Browser State
 backend/data/
 backend/services/notebooklm_skill/data
+docs/
 
