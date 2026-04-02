@@ -37,13 +37,14 @@ class NotebookLMServiceFactory:
     """
 
     @staticmethod
-    def create_service(use_mock: Optional[bool] = None) -> NotebookLMServiceInterface:
+    def create_service(use_mock: Optional[bool] = None, session_id: str = "default") -> NotebookLMServiceInterface:
         """
         Create a NotebookLM service instance.
 
         Args:
             use_mock: If None, uses config.MOCK_NOTEBOOKLM.
                      If True/False, overrides config.
+            session_id: Session ID for per-session isolation (thread pool, browser, cache).
 
         Returns:
             A NotebookLM service instance
@@ -55,12 +56,11 @@ class NotebookLMServiceFactory:
             from services.mock_notebooklm_service import MockNotebookLMService
             return MockNotebookLMService()
         else:
-            # Use the ORIGINAL skill code (copied from skills/notebooklm/)
             from services.notebooklm_skill_service import NotebookLMOriginalSkillService
-            return NotebookLMOriginalSkillService()
+            return NotebookLMOriginalSkillService(session_id=session_id)
 
 
 # Convenience function for quick access
-def get_notebooklm_service() -> NotebookLMServiceInterface:
+def get_notebooklm_service(session_id: str = "default") -> NotebookLMServiceInterface:
     """Get the appropriate NotebookLM service based on current configuration."""
-    return NotebookLMServiceFactory.create_service()
+    return NotebookLMServiceFactory.create_service(session_id=session_id)

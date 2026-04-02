@@ -3,7 +3,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useLanguage } from "./LanguageContext";
 
 interface Citation {
@@ -19,9 +19,10 @@ interface MessageBubbleProps {
   content: string;
   timestamp?: string;
   citations?: Citation[];
+  sessionId?: string;
 }
 
-export default function MessageBubble({ role, content, timestamp, citations }: MessageBubbleProps) {
+export default function MessageBubble({ role, content, timestamp, citations, sessionId }: MessageBubbleProps) {
   const isUser = role === "user";
   const { t } = useLanguage();
 
@@ -91,6 +92,8 @@ export default function MessageBubble({ role, content, timestamp, citations }: M
                       source={citation?.source || `Source ${citationId}`}
                       excerpt={citation?.excerpt}
                       content={citation?.content}
+                      originalIds={citation?.original_ids}
+                      sessionId={sessionId}
                     />
                   );
                 }
@@ -188,20 +191,169 @@ export default function MessageBubble({ role, content, timestamp, citations }: M
   );
 }
 
-/** Inline citation badge rendered as superscript with hover tooltip */
-function InlineCitation({ id, source, excerpt, content }: { id: number; source: string; excerpt?: string; content?: string }) {
-  const [showTooltip, setShowTooltip] = useState(false);
+// Cache for fetched citation content — scoped by sessionId to avoid cross-session pollution
+const citationCache = new Map<string, Map<number, { content: string; images: string[]; success: boolean }>>();
 
-  // Use content (source document excerpt) if available, otherwise fall back to excerpt
-  const tooltipContent = content || excerpt;
+function getCitationCache(sessionId: string) {
+  if (!citationCache.has(sessionId)) {
+    citationCache.set(sessionId, new Map());
+  }
+  return citationCache.get(sessionId)!;
+}
+
+/** Inline citation badge rendered as superscript with hover tooltip */
+function InlineCitation({ id, source, excerpt, content: initialContent, originalIds, sessionId }: {
+  id: number; source: string; excerpt?: string; content?: string; originalIds?: number[]; sessionId?: string;
+}) {
+  const [showTooltip, setShowTooltip] = useState(false);
+  const [fetchedContent, setFetchedContent] = useState<string | null>(null);
+  const [fetchedImages, setFetchedImages] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [fetchError, setFetchError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const [tooltipPos, setTooltipPos] = useState<"top" | "bottom">("top");
+  const [arrowAlign, setArrowAlign] = useState<"center" | "left" | "right">("center");
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const badgeRef = useRef<HTMLSpanElement>(null);
+  const effectiveSessionId = sessionId || "default";
+
+  // Check session-scoped cache
+  const cache = getCitationCache(effectiveSessionId);
+  const cached = cache.get(id);
+  const resolvedContent = initialContent || fetchedContent || (cached?.success ? cached.content : null) || null;
+  const resolvedImages = fetchedImages.length > 0 ? fetchedImages : cached?.images || [];
+
+  const fetchCitationContent = useCallback(async () => {
+    if (initialContent) return;
+
+    // Check session-scoped cache for successful result
+    const sCache = getCitationCache(effectiveSessionId);
+    const cachedEntry = sCache.get(id);
+    if (cachedEntry?.success) {
+      setFetchedContent(cachedEntry.content);
+      setFetchedImages(cachedEntry.images || []);
+      return;
+    }
+
+    // Abort any previous fetch for this citation
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setIsLoading(true);
+    setFetchError(false);
+
+    try {
+      const response = await fetch("/api/citation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          citation_id: id,
+          original_ids: originalIds || [id],
+          session_id: effectiveSessionId,
+        }),
+        signal: controller.signal,
+      });
+
+      if (controller.signal.aborted) return;
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const data = await response.json();
+      if (data.success && data.content) {
+        sCache.set(id, { content: data.content, images: data.images || [], success: true });
+        setFetchedContent(data.content);
+        setFetchedImages(data.images || []);
+        setFetchError(false);
+      } else {
+        // Don't cache failures — allow retry on next hover
+        setFetchError(true);
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setFetchError(true);
+    } finally {
+      if (!controller.signal.aborted) {
+        setIsLoading(false);
+      }
+    }
+  }, [id, originalIds, initialContent, effectiveSessionId]);
+
+  const computePosition = useCallback(() => {
+    if (badgeRef.current) {
+      const rect = badgeRef.current.getBoundingClientRect();
+      const vpW = window.innerWidth;
+      const tooltipH = 250;
+      const tooltipW = 448;
+
+      setTooltipPos(rect.top < tooltipH + 16 ? "bottom" : "top");
+
+      const center = rect.left + rect.width / 2;
+      if (center < tooltipW / 2 + 16) setArrowAlign("left");
+      else if (center > vpW - tooltipW / 2 - 16) setArrowAlign("right");
+      else setArrowAlign("center");
+    }
+  }, []);
+
+  const handleShow = useCallback(() => {
+    // Cancel any pending hide
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+    setShowTooltip(true);
+    computePosition();
+    // Debounce fetch — always try (fetchCitationContent returns early if already resolved)
+    hoverTimerRef.current = setTimeout(() => {
+      fetchCitationContent();
+    }, 300);
+  }, [fetchCitationContent, computePosition]);
+
+  const handleHide = useCallback(() => {
+    // Cancel fetch timer
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+    // Delayed hide: gives user time to move mouse to tooltip
+    hideTimerRef.current = setTimeout(() => {
+      setShowTooltip(false);
+      hideTimerRef.current = null;
+    }, 200);
+  }, []);
+
+  const handleTooltipEnter = useCallback(() => {
+    // Cancel pending hide when mouse enters tooltip
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  }, []);
+
+  const handleTooltipLeave = useCallback(() => {
+    setShowTooltip(false);
+  }, []);
+
+  // Tooltip position classes based on edge detection
+  const posClass = tooltipPos === "bottom" ? "top-full mt-2" : "bottom-full mb-2";
+  const hAlignClass = arrowAlign === "left"
+    ? "left-0"
+    : arrowAlign === "right"
+      ? "right-0"
+      : "left-1/2 -translate-x-1/2";
 
   return (
     <span
       className="relative inline-flex"
-      onMouseEnter={() => setShowTooltip(true)}
-      onMouseLeave={() => setShowTooltip(false)}
+      onMouseEnter={handleShow}
+      onMouseLeave={handleHide}
     >
       <span
+        ref={badgeRef}
         className="inline-flex items-center justify-center
                    w-4 h-4 rounded-full text-[10px] font-bold leading-none
                    bg-gray-500 text-white cursor-help
@@ -212,21 +364,61 @@ function InlineCitation({ id, source, excerpt, content }: { id: number; source: 
       </span>
       {showTooltip && (
         <span
-          className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2
+          className={`absolute ${posClass} ${hAlignClass}
                      px-4 py-2.5 rounded-lg bg-gray-900 text-white text-xs
                      max-w-md whitespace-normal z-50 shadow-lg
-                     text-left font-normal min-w-48"
+                     text-left font-normal min-w-48`}
+          onMouseEnter={handleTooltipEnter}
+          onMouseLeave={handleTooltipLeave}
         >
           <span className="font-semibold text-white">{source}</span>
-          {tooltipContent && (
-            <span className="block mt-1 text-gray-300 text-[11px] leading-relaxed border-t border-gray-700 pt-1 max-h-40 overflow-y-auto">
-              {tooltipContent}
+          {isLoading && (
+            <span className="block mt-1 text-gray-400 text-[11px] italic">
+              Loading source...
             </span>
           )}
-          <span
-            className="absolute top-full left-1/2 -translate-x-1/2
-                       border-4 border-transparent border-t-gray-900"
-          />
+          {!isLoading && resolvedContent && (
+            <span className="block mt-1 text-gray-300 text-[11px] leading-relaxed border-t border-gray-700 pt-1 max-h-60 overflow-y-auto">
+              {/* Render images from citation */}
+              {resolvedImages.length > 0 && (
+                <span className="block mb-2">
+                  {resolvedImages.map((imgUrl, idx) => (
+                    <img
+                      key={idx}
+                      src={imgUrl}
+                      alt={`Citation image ${idx + 1}`}
+                      className="rounded max-w-full h-auto my-1 border border-gray-700"
+                      loading="lazy"
+                    />
+                  ))}
+                </span>
+              )}
+              {/* Render content as markdown */}
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkBreaks]}
+                components={{
+                  p: (props: any) => <p className="my-1 leading-relaxed text-gray-300" {...props} />,
+                  strong: (props: any) => <strong className="font-bold text-white" {...props} />,
+                  em: (props: any) => <em className="italic text-gray-200" {...props} />,
+                  ul: (props: any) => <ul className="list-disc list-inside my-1 ml-2" {...props} />,
+                  ol: (props: any) => <ol className="list-decimal list-inside my-1 ml-2" {...props} />,
+                  li: (props: any) => <li className="leading-relaxed text-gray-300" {...props} />,
+                  h1: (props: any) => <h1 className="text-sm font-bold mt-2 mb-1 text-white" {...props} />,
+                  h2: (props: any) => <h2 className="text-sm font-bold mt-1 text-white" {...props} />,
+                  h3: (props: any) => <h3 className="text-xs font-bold mt-1 text-white" {...props} />,
+                  code: (props: any) => <code className="px-1 py-0.5 rounded text-[11px] font-mono bg-gray-800 text-green-300" {...props} />,
+                  a: (props: any) => <a {...props} target="_blank" rel="noopener noreferrer" className="text-blue-400 underline" />,
+                }}
+              >
+                {resolvedContent}
+              </ReactMarkdown>
+            </span>
+          )}
+          {!isLoading && fetchError && !resolvedContent && (
+            <span className="block mt-1 text-gray-500 text-[11px] italic">
+              Source content unavailable
+            </span>
+          )}
         </span>
       )}
     </span>

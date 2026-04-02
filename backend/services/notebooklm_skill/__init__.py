@@ -16,6 +16,6 @@ if str(_scripts_dir) not in sys.path:
     sys.path.insert(0, str(_scripts_dir))
 
 # Import the main function from the original skill
-from ask_question import ask_notebooklm
+from ask_question import ask_notebooklm, fetch_citation_from_page, close_browser_state, prefetch_all_citations
 
-__all__ = ["ask_notebooklm"]
+__all__ = ["ask_notebooklm", "fetch_citation_from_page", "close_browser_state", "prefetch_all_citations"]

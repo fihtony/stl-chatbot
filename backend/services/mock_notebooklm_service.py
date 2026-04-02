@@ -161,3 +161,10 @@ Question:
             ResponseKeys.SOURCES: [SourceLabels.MOCK_SERVICE],
             ResponseKeys.LANGUAGE: "fr",
         }
+
+    async def fetch_citation_content(self, citation_id: int, original_ids: list = None) -> Dict[str, Any]:
+        """Mock citation fetch - returns placeholder content"""
+        return {
+            "content": f"[Mock source content for citation {citation_id}]",
+            "success": True,
+        }

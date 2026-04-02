@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import MessageBubble from "./MessageBubble";
 import SuggestedQuestions from "./SuggestedQuestions";
 import InputArea from "./InputArea";
@@ -16,11 +16,18 @@ interface Citation {
 }
 
 interface Message {
+  id: string;
   role: "user" | "assistant";
   content: string;
   timestamp?: string;
   citations?: Citation[];
   suggestions?: string[];
+  sessionId?: string;
+}
+
+// Generate a unique session ID per chat instance
+function generateSessionId(): string {
+  return `s_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 }
 
 export default function ChatContainer() {
@@ -28,15 +35,18 @@ export default function ChatContainer() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const sessionId = useMemo(() => generateSessionId(), []);
 
   // Reset welcome message when language changes
   useEffect(() => {
     if (messages.length === 0) {
       setMessages([
         {
+          id: "welcome",
           role: "assistant",
           content: t.welcomeMessage,
           timestamp: new Date().toISOString(),
+          sessionId,
         },
       ]);
     }
@@ -47,9 +57,11 @@ export default function ChatContainer() {
     if (messages.length === 0) {
       setMessages([
         {
+          id: "welcome",
           role: "assistant",
           content: t.welcomeMessage,
           timestamp: new Date().toISOString(),
+          sessionId,
         },
       ]);
     }
@@ -65,14 +77,15 @@ export default function ChatContainer() {
 
   const handleSend = async (message: string) => {
     const now = new Date().toISOString();
-    setMessages((prev) => [...prev, { role: "user", content: message, timestamp: now }]);
+    const msgId = `msg_${Date.now()}`;
+    setMessages((prev) => [...prev, { id: msgId, role: "user", content: message, timestamp: now, sessionId }]);
     setIsLoading(true);
 
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, session_id: sessionId }),
       });
 
       if (!response.ok) throw new Error("Failed to get response");
@@ -86,11 +99,13 @@ export default function ChatContainer() {
       setMessages((prev) => [
         ...prev,
         {
+          id: `resp_${Date.now()}`,
           role: "assistant",
           content: responseText,
           timestamp: new Date().toISOString(),
           citations,
           suggestions,
+          sessionId,
         },
       ]);
     } catch (error) {
@@ -98,9 +113,11 @@ export default function ChatContainer() {
       setMessages((prev) => [
         ...prev,
         {
+          id: `err_${Date.now()}`,
           role: "assistant",
           content: t.errorMessage,
           timestamp: new Date().toISOString(),
+          sessionId,
         },
       ]);
     } finally {
@@ -119,6 +136,7 @@ export default function ChatContainer() {
               role={msg.role}
               content={msg.content}
               citations={msg.citations}
+              sessionId={msg.sessionId}
             />
           ))}
           {/* Show suggestions from the last assistant message */}

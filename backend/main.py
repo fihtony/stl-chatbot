@@ -1,6 +1,6 @@
 import sys
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Dict, Optional
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -12,13 +12,14 @@ from utils.constants import (
     NotebookLMStatus,
     HealthStatus,
 )
-from models.schemas import ChatRequest, ChatResponse, HealthResponse
+from models.schemas import ChatRequest, ChatResponse, HealthResponse, CitationRequest, CitationContentResponse
 from services.auth_service import AuthService
 from services.service_factory import get_notebooklm_service, NotebookLMServiceInterface
 
 # Lazy initialization - services will be created when needed
 _auth_service: Optional[AuthService] = None
-_notebooklm_service: Optional[NotebookLMServiceInterface] = None
+_notebooklm_services: Dict[str, NotebookLMServiceInterface] = {}  # Session-scoped services
+_notebooklm_default: Optional[NotebookLMServiceInterface] = None  # Default service for non-session requests
 
 # Cache for authentication status (updated at startup)
 # Type: Optional[NotebookLMStatus] - None indicates not yet initialized
@@ -33,18 +34,27 @@ def get_auth_service() -> AuthService:
     return _auth_service
 
 
-def get_notebooklm() -> NotebookLMServiceInterface:
-    """Lazy initialization of NotebookLM service"""
-    global _notebooklm_service
-    if _notebooklm_service is None:
-        _notebooklm_service = get_notebooklm_service()
-    return _notebooklm_service
+def get_notebooklm(session_id: str = None) -> NotebookLMServiceInterface:
+    """Get session-scoped NotebookLM service.
+
+    Each session gets its own service instance with isolated browser state,
+    citation cache, and thread pool. If no session_id is provided, uses default singleton.
+    """
+    global _notebooklm_default, _notebooklm_services
+    if session_id:
+        if session_id not in _notebooklm_services:
+            _notebooklm_services[session_id] = get_notebooklm_service(session_id=session_id)
+        return _notebooklm_services[session_id]
+    else:
+        if _notebooklm_default is None:
+            _notebooklm_default = get_notebooklm_service(session_id="default")
+        return _notebooklm_default
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan"""
-    global _auth_status_cache
+    global _auth_status_cache, _notebooklm_default, _notebooklm_services
     logger.info("=== Starting NotebookLM Chatbot Backend ===")
 
     try:
@@ -81,7 +91,18 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Cleanup: shut down all session-scoped services
     logger.info("=== Shutting down ===")
+    for sid, svc in list(_notebooklm_services.items()):
+        try:
+            if hasattr(svc, 'shutdown'):
+                svc.shutdown()
+        except Exception:
+            pass
+    _notebooklm_services.clear()
+    if _notebooklm_default and hasattr(_notebooklm_default, 'shutdown'):
+        _notebooklm_default.shutdown()
+        _notebooklm_default = None
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -159,7 +180,7 @@ async def chat(request: ChatRequest):
     Processes user messages and returns responses from NotebookLM (or mock service)
     """
     try:
-        service = get_notebooklm()
+        service = get_notebooklm(request.session_id)
         result = service.query(request.message)
 
         return ChatResponse(
@@ -168,12 +189,51 @@ async def chat(request: ChatRequest):
             sources=result[ResponseKeys.SOURCES],
             citations=result.get("citations", []),
             suggestions=result.get("suggestions", []),
+            session_id=request.session_id,
         )
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail="An error occurred while processing your request. Please try again later."
+        )
+
+
+@app.post("/api/citation", response_model=CitationContentResponse)
+async def citation(request: CitationRequest):
+    """
+    Citation content endpoint
+    Fetches the source document content for a citation on-demand (lazy loading).
+    Uses the browser session kept alive from the previous chat query.
+    Non-blocking — delegates to session's dedicated thread pool.
+    """
+    try:
+        service = get_notebooklm(request.session_id)
+        if not hasattr(service, 'fetch_citation_content'):
+            return CitationContentResponse(
+                content="",
+                success=False,
+                error="Citation loading not supported in this mode"
+            )
+
+        result = await service.fetch_citation_content(
+            citation_id=request.citation_id,
+            original_ids=request.original_ids
+        )
+
+        return CitationContentResponse(
+            content=result.get("content", ""),
+            success=result.get("success", False),
+            error=result.get("error"),
+            images=result.get("images", []),
+        )
+
+    except Exception as e:
+        logger.error(f"Citation fetch error: {e}", exc_info=True)
+        return CitationContentResponse(
+            content="",
+            success=False,
+            error="Failed to fetch citation content"
         )
 
 

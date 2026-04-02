@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 // TypeScript interfaces
 interface ChatRequest {
   message: string;
+  session_id?: string;
 }
 
 interface ChatResponse {
@@ -49,7 +50,7 @@ function validateMessage(message: string): { valid: boolean; error?: string } {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json() as ChatRequest;
-    const { message } = body;
+    const { message, session_id } = body;
 
     // Validate message
     const validation = validateMessage(message);
@@ -72,7 +73,7 @@ export async function POST(request: NextRequest) {
       const response = await fetch(`${BACKEND_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmedMessage }),
+        body: JSON.stringify({ message: trimmedMessage, session_id }),
         signal: controller.signal,
       });
 
