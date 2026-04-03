@@ -1,4 +1,6 @@
 import sys
+import time
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -7,6 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from utils.config import config
 from utils.logger import logger
+from utils.database import init_db
 from utils.constants import (
     ResponseKeys,
     NotebookLMStatus,
@@ -15,6 +18,9 @@ from utils.constants import (
 from models.schemas import ChatRequest, ChatResponse, HealthResponse, CitationRequest, CitationContentResponse
 from services.auth_service import AuthService
 from services.service_factory import get_notebooklm_service, NotebookLMServiceInterface
+from services.admin_router import router as admin_router
+from services.public_config_router import router as public_config_router, cleanup_old_logs
+from services.chat_logger import log_chat_request
 
 # Lazy initialization - services will be created when needed
 _auth_service: Optional[AuthService] = None
@@ -63,6 +69,9 @@ async def lifespan(app: FastAPI):
         logger.error(f"Configuration error: {e}")
         sys.exit(1)
 
+    # Initialize SQLite database
+    await init_db()
+
     # Skip authentication in mock mode
     if config.MOCK_NOTEBOOKLM:
         logger.info("🎭 MOCK MODE: Using MockNotebookLMService (authentication skipped)")
@@ -70,26 +79,39 @@ async def lifespan(app: FastAPI):
         # Initialize auth service only in non-mock mode
         auth = get_auth_service()
 
-        # Check authentication status
+        # Check authentication status - start in degraded mode if not authenticated
+        # Admin can re-authenticate via the admin panel without restarting the server
         if not auth.is_authenticated():
-            logger.info("No authentication found, starting auth flow...")
-            if not auth.authenticate():
-                logger.error("Authentication failed")
-                sys.exit(1)
+            logger.warning(
+                "⚠️  NotebookLM not authenticated. Chat will be unavailable until re-authenticated. "
+                "Use the admin panel to re-authenticate."
+            )
+            _auth_status_cache = NotebookLMStatus.NOT_AUTHENTICATED
         else:
             logger.info("✅ Authentication found")
+            _auth_status_cache = NotebookLMStatus.AUTHENTICATED
+            logger.info("✅ Connected to NotebookLM")
 
-        # Cache authentication status for health checks
-        _auth_status_cache = (
-            NotebookLMStatus.AUTHENTICATED
-            if auth.is_authenticated()
-            else NotebookLMStatus.NOT_AUTHENTICATED
-        )
+    # Schedule daily log cleanup
+    async def _log_cleanup_loop():
+        while True:
+            await asyncio.sleep(86400)  # Run once per day
+            try:
+                await cleanup_old_logs()
+                logger.info("Log cleanup completed")
+            except Exception as exc:
+                logger.warning("Log cleanup failed: %s", exc)
 
-        # When authenticated, assume NotebookLM is connected (no extra query)
-        logger.info("✅ Connected to NotebookLM")
+    cleanup_task = asyncio.create_task(_log_cleanup_loop())
 
     yield
+
+    # Cancel background task
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
 
     # Cleanup: shut down all session-scoped services
     logger.info("=== Shutting down ===")
@@ -138,6 +160,10 @@ app.add_middleware(
 # Add security headers middleware
 app.add_middleware(SecurityHeadersMiddleware)
 
+# Register routers
+app.include_router(admin_router)
+app.include_router(public_config_router)
+
 
 @app.get("/api/health", response_model=HealthResponse)
 async def health_check():
@@ -174,25 +200,91 @@ async def health_check():
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request):
     """
     Chat endpoint
-    Processes user messages and returns responses from NotebookLM (or mock service)
+    Processes user messages and returns responses from NotebookLM (or mock service).
+    Blocked during maintenance mode (unless the caller is an authenticated admin).
     """
+    # --- Maintenance mode guard ---
+    try:
+        from utils.database import get_db as _get_db
+        async with await _get_db() as _db:
+            _cfg = await (await _db.execute(
+                "SELECT maintenance_mode FROM admin_config WHERE id=1"
+            )).fetchone()
+        if _cfg and bool(_cfg["maintenance_mode"]):
+            # Allow admins through (check JWT cookie)
+            from services.admin_auth_service import decode_admin_jwt, COOKIE_NAME
+            token = http_request.cookies.get(COOKIE_NAME)
+            if not token or not decode_admin_jwt(token):
+                raise HTTPException(
+                    status_code=503,
+                    detail="System is currently under maintenance. Please try again later."
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # DB not yet ready — allow request through
+
+    # --- Collect request metadata for logging ---
+    ua_str = http_request.headers.get("user-agent", "")
+    lang_pref = http_request.headers.get("accept-language", "")
+    referer = http_request.headers.get("referer", "")
+    # Extract real IP: respect X-Forwarded-For set by a trusted reverse proxy
+    forwarded_for = http_request.headers.get("x-forwarded-for", "")
+    real_ip = forwarded_for.split(",")[0].strip() if forwarded_for else (
+        http_request.client.host if http_request.client else ""
+    )
+
+    start_ms = int(time.time() * 1000)
     try:
         service = get_notebooklm(request.session_id)
         result = service.query(request.message)
 
+        response_ms = int(time.time() * 1000) - start_ms
+        answer = result[ResponseKeys.ANSWER]
+
+        # Fire-and-forget log (don't block the response)
+        asyncio.create_task(log_chat_request(
+            session_id=request.session_id or "default",
+            question=request.message,
+            answer=answer,
+            user_agent_str=ua_str,
+            real_ip=real_ip,
+            language_pref=lang_pref[:50],
+            referer=referer[:200],
+            response_ms=response_ms,
+            is_error=False,
+        ))
+
         return ChatResponse(
-            answer=result[ResponseKeys.ANSWER],
+            answer=answer,
             language=result[ResponseKeys.LANGUAGE],
             sources=result[ResponseKeys.SOURCES],
             citations=result.get("citations", []),
             suggestions=result.get("suggestions", []),
             session_id=request.session_id,
         )
+    except HTTPException:
+        raise
     except Exception as e:
+        response_ms = int(time.time() * 1000) - start_ms
+        err_str = str(e)
         logger.error(f"Chat error: {e}", exc_info=True)
+        asyncio.create_task(log_chat_request(
+            session_id=request.session_id or "default",
+            question=request.message,
+            answer=None,
+            user_agent_str=ua_str,
+            real_ip=real_ip,
+            language_pref=lang_pref[:50],
+            referer=referer[:200],
+            response_ms=response_ms,
+            is_error=True,
+            error_summary=err_str[:300],
+            error_detail=err_str,
+        ))
         raise HTTPException(
             status_code=500,
             detail="An error occurred while processing your request. Please try again later."

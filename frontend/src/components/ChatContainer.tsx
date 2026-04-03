@@ -25,12 +25,17 @@ interface Message {
   sessionId?: string;
 }
 
+interface ChatContainerProps {
+  inputBlocked?: boolean;
+  blockReason?: string;
+}
+
 // Generate a unique session ID per chat instance
 function generateSessionId(): string {
   return `s_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 }
 
-export default function ChatContainer() {
+export default function ChatContainer({ inputBlocked = false, blockReason }: ChatContainerProps) {
   const { language, t } = useLanguage();
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -76,6 +81,10 @@ export default function ChatContainer() {
   }, [messages, isLoading]);
 
   const handleSend = async (message: string) => {
+    if (inputBlocked || isLoading) {
+      return;
+    }
+
     const now = new Date().toISOString();
     const msgId = `msg_${Date.now()}`;
     setMessages((prev) => [...prev, { id: msgId, role: "user", content: message, timestamp: now, sessionId }]);
@@ -130,6 +139,11 @@ export default function ChatContainer() {
       {/* Messages Container - scrollable area */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
         <div className="max-w-6xl mx-auto space-y-4">
+          {inputBlocked && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              {blockReason || "Please refresh before sending new messages."}
+            </div>
+          )}
           {messages.map((msg, index) => (
             <MessageBubble
               key={index}
@@ -156,7 +170,7 @@ export default function ChatContainer() {
       </div>
 
       {/* Input Area - fixed at bottom */}
-      <InputArea onSend={handleSend} disabled={isLoading} />
+      <InputArea onSend={handleSend} disabled={isLoading || inputBlocked} />
     </div>
   );
 }

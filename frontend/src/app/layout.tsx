@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import "../styles/globals.css";
 import { LanguageProvider } from "@/components/LanguageContext";
+import { AdminProvider } from "@/components/AdminContext";
 
 export const metadata: Metadata = {
-  title: "Saint-Louis Chatbot",
-  description: "Your guide to insurance, wealth, and health solutions",
+  title: "Collège Saint-Louis Chatbot",
+  description: "Your guide to school information and services",
 };
 
 export const viewport = {
@@ -20,7 +21,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <LanguageProvider>{children}</LanguageProvider>
+        <LanguageProvider>
+          <AdminProvider>
+            {children}
+          </AdminProvider>
+        </LanguageProvider>
       </body>
     </html>
   );

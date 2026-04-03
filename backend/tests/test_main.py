@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from fastapi.testclient import TestClient
 
 
@@ -7,8 +7,9 @@ from fastapi.testclient import TestClient
 def mock_services():
     """Mock auth and notebooklm services"""
     # Mock the service factory functions
-    with patch('backend.main.get_auth_service') as mock_get_auth, \
-         patch('backend.main.get_notebooklm') as mock_get_nl:
+    with patch('main.get_auth_service') as mock_get_auth, \
+         patch('main.get_notebooklm') as mock_get_nl, \
+         patch('main.log_chat_request', new_callable=AsyncMock):
 
         # Create mock service instances
         mock_auth = Mock()
@@ -72,6 +73,19 @@ def test_chat_endpoint(client, mock_services):
     assert "sources" in data
 
     # Verify service was called correctly
+    mock_notebooklm.query.assert_called_once_with("Hello")
+
+
+def test_chat_endpoint_uses_default_session_when_missing(client, mock_services):
+    """Chat without a session ID should still succeed and use the default service."""
+    _, mock_notebooklm = mock_services
+
+    response = client.post(
+        "/api/chat",
+        json={"message": "Hello"}
+    )
+
+    assert response.status_code == 200
     mock_notebooklm.query.assert_called_once_with("Hello")
 
 

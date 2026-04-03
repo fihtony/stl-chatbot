@@ -39,6 +39,13 @@ jest.mock('react-markdown', () => {
 })
 
 jest.mock('remark-gfm', () => ({}))
+jest.mock('remark-breaks', () => ({}))
+
+Object.assign(navigator, {
+  clipboard: {
+    writeText: jest.fn(),
+  },
+})
 
 // Mock window.matchMedia
 Object.defineProperty(window, 'matchMedia', {

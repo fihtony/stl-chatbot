@@ -18,8 +18,8 @@ def setup_logger(name: str = "nblm-backend") -> logging.Logger:
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
-        # File handler for logs/backend.log
-        log_dir = Path(__file__).parent.parent.parent.parent / "logs"
+        # File handler for logs/backend.log — resolve to <project_root>/logs/
+        log_dir = Path(__file__).parent.parent.parent / "logs"
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / "backend.log"
         

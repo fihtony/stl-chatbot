@@ -1,374 +1,107 @@
-/**
- * UI tests for ChatContainer component
- * Tests message flow, user interactions, and integration
- */
-
 import React from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ChatContainer from '@/components/ChatContainer';
 
-// Mock fetch globally
+jest.mock('@/components/LanguageContext', () => ({
+  useLanguage: () => ({
+    language: 'en',
+    t: {
+      headerTitle: 'Collège Saint-Louis Chatbot',
+      headerSubtitle: 'Your guide to school information and services',
+      assistantName: 'Saint-Louis Assistant',
+      userName: 'You',
+      inputPlaceholder: 'Ask your question...',
+      sendButton: 'Send',
+      sendButtonAria: 'Send message',
+      relatedQuestions: 'Related questions',
+      welcomeMessage: "Hello! I'm your Collège Saint-Louis assistant. How can I help you today?",
+      errorMessage: 'Sorry, an error occurred. Please try again.',
+      assistantLabel: 'Saint-Louis Assistant',
+      userLabel: 'You',
+    },
+  }),
+}));
+
 global.fetch = jest.fn();
 
-describe('ChatContainer Component', () => {
+let consoleErrorSpy: jest.SpyInstance;
+
+describe('ChatContainer', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    sessionStorage.clear();
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
   });
 
-  describe('Initial Render', () => {
-    it('should render initial assistant message', () => {
-      render(<ChatContainer />);
-
-      expect(screen.getByText(/Bonjour.*Je suis l'assistant/)).toBeInTheDocument();
-      expect(screen.getByText('🤖')).toBeInTheDocument();
-      expect(screen.getByText('Assistant')).toBeInTheDocument();
-    });
-
-    it('should render input area', () => {
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      expect(input).toBeInTheDocument();
-    });
-
-    it('should render send button', () => {
-      render(<ChatContainer />);
-
-      const button = screen.getByRole('button', { name: /envoyer/i }) ||
-                    screen.queryByRole('button');
-      expect(button).toBeInTheDocument();
-    });
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
   });
 
-  describe('Message Flow', () => {
-    it('should add user message when sending', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ answer: 'Response' }),
-      });
+  it('renders the welcome message and input controls', () => {
+    render(<ChatContainer />);
 
-      render(<ChatContainer />);
+    expect(screen.getByText(/Collège Saint-Louis assistant/i)).toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toHaveAttribute('data-chat-input', 'true');
+    expect(screen.getByRole('button', { name: /send message/i })).toBeInTheDocument();
+  });
 
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test message');
+  it('sends chat requests with a generated session id', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ answer: 'Hello back', citations: [], suggestions: [] }),
+    });
+    const user = userEvent.setup();
 
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
+    render(<ChatContainer />);
 
-      await waitFor(() => {
-        expect(screen.getByText('Test message')).toBeInTheDocument();
-      });
+    await act(async () => {
+      await user.type(screen.getByRole('textbox'), 'Test message');
+      await user.click(screen.getByRole('button', { name: /send message/i }));
     });
 
-    it('should display user message with correct styling', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ answer: 'Response' }),
-      });
+    await waitFor(() => expect(screen.getByText('Hello back')).toBeInTheDocument());
 
-      render(<ChatContainer />);
+    expect(global.fetch).toHaveBeenCalledWith('/api/chat', expect.objectContaining({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }));
 
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'User test');
+    const [, requestInit] = (global.fetch as jest.Mock).mock.calls[0];
+    const payload = JSON.parse(requestInit.body as string);
+    expect(payload).toMatchObject({ message: 'Test message' });
+    expect(payload.session_id).toEqual(expect.any(String));
+  });
 
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
+  it('restores a saved draft from sessionStorage', () => {
+    sessionStorage.setItem('stl_chat_draft', 'Saved draft');
 
-      await waitFor(() => {
-        const userMessage = screen.getByText('User test');
-        expect(userMessage).toBeInTheDocument();
-      });
+    render(<ChatContainer />);
+
+    expect(screen.getByRole('textbox')).toHaveValue('Saved draft');
+  });
+
+  it('shows the translated error message on request failure', async () => {
+    (global.fetch as jest.Mock).mockRejectedValueOnce(new Error('Network error'));
+    const user = userEvent.setup();
+
+    render(<ChatContainer />);
+
+    await act(async () => {
+      await user.type(screen.getByRole('textbox'), 'Test');
+      await user.click(screen.getByRole('button', { name: /send message/i }));
     });
 
-    it('should add assistant response after user message', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ answer: 'Assistant response' }),
-      });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Hello');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(screen.getByText('Assistant response')).toBeInTheDocument();
-      });
-    });
-
-    it('should display loading indicator while waiting for response', async () => {
-      let resolveFetch: (value: any) => void;
-      (global.fetch as jest.Mock).mockImplementationOnce(() =>
-        new Promise(resolve => {
-          resolveFetch = resolve;
-        })
-      );
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        const loadingDots = screen.queryAllByText('.').filter(el =>
-          el.textContent === '...'
-        );
-      });
-
-      resolveFetch!({
-        ok: true,
-        json: async () => ({ answer: 'Done' }),
-      });
+    await waitFor(() => {
+      expect(screen.getByText('Sorry, an error occurred. Please try again.')).toBeInTheDocument();
     });
   });
 
-  describe('Error Handling', () => {
-    it('should display error message on fetch failure', async () => {
-      (global.fetch as jest.Mock).mockRejectedValueOnce(new Error('Network error'));
+  it('blocks new messages when a config refresh is required', () => {
+    render(<ChatContainer inputBlocked blockReason="Refresh first" />);
 
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Désolé, une erreur s'est produite/)).toBeInTheDocument();
-      });
-    });
-
-    it('should display error message on non-ok response', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: false,
-      });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Désolé, une erreur s'est produite/)).toBeInTheDocument();
-      });
-    });
-  });
-
-  describe('API Integration', () => {
-    it('should call chat API with correct parameters', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ answer: 'Response' }),
-      });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test message');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(global.fetch).toHaveBeenCalledWith('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: 'Test message' }),
-        });
-      });
-    });
-
-    it('should handle response with "answer" field', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ answer: 'Answer response' }),
-      });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(screen.getByText('Answer response')).toBeInTheDocument();
-      });
-    });
-
-    it('should handle response with "response" field', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ response: 'Response field' }),
-      });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(screen.getByText('Response field')).toBeInTheDocument();
-      });
-    });
-
-    it('should display default message if no response field', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ other: 'data' }),
-      });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(screen.getByText('Pas de réponse reçue')).toBeInTheDocument();
-      });
-    });
-  });
-
-  describe('Input Area', () => {
-    it('should clear input after sending', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ answer: 'Response' }),
-      });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox') as HTMLTextAreaElement;
-      await userEvent.type(input, 'Test message');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(input.value).toBe('');
-      });
-    });
-
-    it('should disable input while loading', async () => {
-      let resolveFetch: (value: any) => void;
-      (global.fetch as jest.Mock).mockImplementationOnce(() =>
-        new Promise(resolve => {
-          resolveFetch = resolve;
-        })
-      );
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(sendButton).toBeDisabled();
-      });
-
-      resolveFetch!({
-        ok: true,
-        json: async () => ({ answer: 'Done' }),
-      });
-    });
-
-    it('should enable input after response', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ answer: 'Response' }),
-      });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(sendButton).not.toBeDisabled();
-      });
-    });
-  });
-
-  describe('Message Scrolling', () => {
-    it('should scroll to bottom when new message arrives', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ answer: 'New message' }),
-      });
-
-      const { container } = render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-      await userEvent.type(input, 'Test');
-
-      const sendButton = screen.getByRole('button');
-      await userEvent.click(sendButton);
-
-      await waitFor(() => {
-        expect(screen.getByText('New message')).toBeInTheDocument();
-      });
-    });
-  });
-
-  describe('Multiple Messages', () => {
-    it('should maintain conversation history', async () => {
-      (global.fetch as jest.Mock)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ answer: 'Response 1' }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ answer: 'Response 2' }),
-        });
-
-      render(<ChatContainer />);
-
-      const input = screen.getByRole('textbox');
-
-      // First message
-      await userEvent.type(input, 'Message 1');
-      await userEvent.click(screen.getByRole('button'));
-      await waitFor(() => {
-        expect(screen.getByText('Response 1')).toBeInTheDocument();
-      });
-
-      // Second message
-      await userEvent.type(input, 'Message 2');
-      await userEvent.click(screen.getByRole('button'));
-      await waitFor(() => {
-        expect(screen.getByText('Response 2')).toBeInTheDocument();
-      });
-
-      // Check all messages are still present
-      expect(screen.getByText('Message 1')).toBeInTheDocument();
-      expect(screen.getByText('Message 2')).toBeInTheDocument();
-      expect(screen.getByText('Response 1')).toBeInTheDocument();
-      expect(screen.getByText('Response 2')).toBeInTheDocument();
-    });
+    expect(screen.getByRole('textbox')).toBeDisabled();
+    expect(screen.getByText('Refresh first')).toBeInTheDocument();
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });

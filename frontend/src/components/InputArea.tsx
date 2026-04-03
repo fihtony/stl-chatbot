@@ -3,6 +3,8 @@
 import { useState, FormEvent, useRef, useEffect } from "react";
 import { useLanguage } from "./LanguageContext";
 
+const DRAFT_KEY = "stl_chat_draft";
+
 interface InputAreaProps {
   onSend: (message: string) => void;
   disabled: boolean;
@@ -12,6 +14,17 @@ export default function InputArea({ onSend, disabled }: InputAreaProps) {
   const [message, setMessage] = useState("");
   const { t } = useLanguage();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    try {
+      const savedDraft = sessionStorage.getItem(DRAFT_KEY);
+      if (savedDraft) {
+        setMessage(savedDraft);
+      }
+    } catch {
+      // Ignore session storage errors.
+    }
+  }, []);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -24,11 +37,28 @@ export default function InputArea({ onSend, disabled }: InputAreaProps) {
     }
   }, [message]);
 
+  useEffect(() => {
+    try {
+      if (message) {
+        sessionStorage.setItem(DRAFT_KEY, message);
+      } else {
+        sessionStorage.removeItem(DRAFT_KEY);
+      }
+    } catch {
+      // Ignore session storage errors.
+    }
+  }, [message]);
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (message.trim() && !disabled) {
       onSend(message.trim());
       setMessage("");
+      try {
+        sessionStorage.removeItem(DRAFT_KEY);
+      } catch {
+        // Ignore session storage errors.
+      }
       if (textareaRef.current) {
         textareaRef.current.style.height = "48px";
       }
@@ -61,6 +91,7 @@ export default function InputArea({ onSend, disabled }: InputAreaProps) {
                 height: "48px",
                 overflowY: "hidden",
               }}
+              data-chat-input="true"
               disabled={disabled}
               aria-label={t.inputPlaceholder}
             />
